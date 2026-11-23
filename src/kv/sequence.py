@@ -10,6 +10,7 @@ class Sequence:
 
     block_table: list[int] = field(default_factory=list) # 逻辑块索引到物理块索引的映射 PagedAttention页表
     num_cached_tokens: int = 0
+    num_computed_tokens: int = 0  # 已有有效 KV 的连续前缀长度（包括缓存命中）
 
 
     @property

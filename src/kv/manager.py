@@ -70,6 +70,7 @@ class KVManager:
         """前缀命中复用页，其余 allocte_fresh;写好 block_table"""
         seq.block_table.clear()
         seq.num_cached_tokens = 0 #当前请求复用的前缀token数量
+        seq.num_computed_tokens = 0
         need = seq.num_blocks
         if need ==0:
             self.last_num_cached_tokens = 0
@@ -99,6 +100,7 @@ class KVManager:
             seq.block_table.append(self.pool.allocate_fresh())
 
         seq.num_cached_tokens = max_cached * self.block_size
+        seq.num_computed_tokens = seq.num_cached_tokens
         self.last_num_cached_tokens = seq.num_cached_tokens
 
 
@@ -110,9 +112,8 @@ class KVManager:
             seq.block_table.append(self.pool.allocate_fresh())
 
     def finish(self,seq:Sequence) -> None:
-        """ 满块发布进前缀索引；页转 cached 或 free """
-        # 序列seq执行结束，收尾
-        n_full = seq.num_full_blocks()
+        """ 发布已写完 KV 的整块；页转 cached 或 free """
+        n_full = seq.num_computed_tokens // self.block_size
         if n_full > 0: # 注册发布到前缀索引
             self.index.publish(seq,n_full,self.pool)
         published = set(seq.block_table[:n_full]) if n_full > 0 else set() # 进索引的满块bid
@@ -125,3 +126,4 @@ class KVManager:
             self.pool.release_to_cached_or_free(bid, keep_cached=keep) # 所有块更新物理池状态
         seq.block_table.clear()
         seq.num_cached_tokens = 0
+        seq.num_computed_tokens = 0

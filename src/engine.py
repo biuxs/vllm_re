@@ -158,8 +158,6 @@ class Engine:
                 # 向前传播，输出最后一层隐藏状态h,shape=[1,seq_len,hidden_size]
                 h = self.model(input_ids,positions)
 
-                logits = self.model.compute_logits(h[:, -1:]).squeeze(1)
-
             else:# 整个prompt完全命中前缀缓存
                 self._bind_ctx(
                     seq,is_prefill=False,cache_len=prompt_len - 1, write_end=prompt_len
@@ -170,9 +168,10 @@ class Engine:
                 )
                 # 需要最后一个token的输出hidden_state来采样第一个输出token
                 h = self.model(input_ids, positions)
-                logits = self.model.compute_logits(h[:, -1:]).squeeze(1)
 
             # prefill结束
+            seq.num_computed_tokens = prompt_len
+            logits = self.model.compute_logits(h[:, -1:]).squeeze(1)
             # item() 把0维标量张量数字取出，转换成python数字,之后转换成整数得到下一个token_id
             next_id = int(self.sampler(logits,temp_t,top_p_t,top_k_t).item())
             # 1 解码，首先将int输入包装成列表，之后解码翻译成对应的字符串片段
@@ -181,12 +180,12 @@ class Engine:
                     return
             seq.append_token(next_id)
             self.kv.ensure_blocks(seq)
-            cached_len = prompt_len
 
 
 
             #开启decode循环
             for _ in range(max_new_tokens - 1):# 已经产出了一个token，需要循环生成最多max_new_token-1个
+                cached_len = seq.num_computed_tokens
                 if cached_len >= self.context_len:
                         break # 上下文上限保护
                 self._bind_ctx(
@@ -195,11 +194,11 @@ class Engine:
                 ids = torch.tensor([[next_id]], device=self.device, dtype=torch.long)
                 positions = torch.tensor([[cached_len]],device=self.device, dtype=torch.long)
                 h = self.model(ids,positions)
+                seq.num_computed_tokens = cached_len + 1
 
                 logits = self.model.compute_logits(h[:, -1:]).squeeze(1)
                 #如果是贪心的话就是直接取最大的
                 next_id = int(self.sampler(logits,temp_t,top_p_t, top_k_t).item())
-                cached_len+=1
 
 
                 seq.append_token(next_id)
