@@ -60,7 +60,7 @@ def _apply_top_p(sorted_logits: torch.Tensor, top_p: torch.Tensor) -> torch.Tens
 
     probs = sorted_logits.softmax(dim=-1)
 
-    mask = probs.cumsum(dim=-1) > p.unsqueeze(1)
+    mask = probs.cumsum(dim=-1) - probs> p.unsqueeze(1)
 
     # 第一个位置（最大概率）必须保留
     mask[:, 0] = False

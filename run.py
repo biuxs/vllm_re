@@ -29,6 +29,9 @@ DEFAULTS = {
     "top_k": 20,
     "enforce_eager": True,
     "dtype": "auto",
+    "context_len": 2048,
+    "block_size": 16,
+    "prefix_backend": "hash",
 }
 
 def run(cfg:dict) -> None:
@@ -37,23 +40,26 @@ def run(cfg:dict) -> None:
     engine = Engine(
         EngineConfig(
             model=str(model_path),
-            enforce_eager=cfg["enforce_eager"],
-            dtype=cfg["dtype"],)
-        )
+            # enforce_eager=cfg["enforce_eager"],
+            dtype=cfg["dtype"],
+            context_len=cfg["context_len"],
+            block_size=cfg["block_size"],
+            prefix_backend=cfg["prefix_backend"],
+        ))
 
     prompt = cfg["prompt"]
     print(f"Prompt: {prompt}\n{prompt}", end="", flush=True)
     start = time.perf_counter()
     n = 0
-    for text,count in engine.generate(
+    for tok in engine.generate(
         prompt,
         max_new_tokens=cfg["max_new_tokens"],
         temperature=cfg["temperature"],
         top_p=cfg["top_p"],
         top_k=cfg["top_k"],
     ):
-        print(text,end="",flush=True)
-        n += count
+        print(tok,end="",flush=True)
+        n += 1
     elapsed = time.perf_counter() - start
     #重要指标单次请求的平均生成吞吐率tok/s
     print(f"\n\n{n} tokens in {elapsed:.2f}s ({n / elapsed:.1f} tok/s)")
@@ -70,6 +76,8 @@ def main() -> None:
     p.add_argument("--top-k", type=int, default=None)
     p.add_argument("--download", action="store_true")
     p.add_argument("--list", action="store_true")
+    p.add_argument("--block-size", type=int, default=None)
+    p.add_argument("--prefix-backend", choices=("none", "hash"), default=None)
     args = p.parse_args()
 
     if args.list:
@@ -84,7 +92,7 @@ def main() -> None:
 
     config_path = Path(args.config) if args.config else HERE / "config.yaml"
     cfg = load_config(config_path,DEFAULTS)
-    merge_cli(cfg, args, ("model", "prompt", "max_new_tokens", "temperature", "top_p", "top_k"))
+    merge_cli(cfg, args, ("model", "prompt", "max_new_tokens", "temperature", "top_p", "top_k","block-size","prefix-backend"))
     run(cfg)
 
 if __name__ == "__main__":

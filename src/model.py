@@ -1,11 +1,18 @@
 import torch
 from torch import nn
 from transformers.models.qwen3 import Qwen3Config
+from collections.abc import Iterable
 from .layers.attention import Attention
 from .layers.layernorm import RMSNorm
 from .layers.activation import SiluAndMul
 from .layers.rotary import RotaryEmbedding
 from .model_loader import default_weight_loader
+
+_QKV_SHARDS = (
+    ("q_proj",lambda q,kv:(0,q)),
+    ("k_proj",lambda q,kv:(q,kv)),
+    ("v_proj",lambda q,kv:(q+kv,kv)),
+)
 
 #权重共享用于验证 Qwen3 推理流程，实际应用时可以注释掉
 # class _TiedLinear(nn.Module):
@@ -29,7 +36,7 @@ class Qwen3MLP(nn.Module):
 
 
 class Qwen3Attention(nn.Module):
-    def __init__(self,config:Qwen3Config):
+    def __init__(self,config:Qwen3Config,layer_id:int):
         super().__init__()
 
         self.num_heads = config.num_attention_heads
@@ -43,7 +50,7 @@ class Qwen3Attention(nn.Module):
 
         self.o_proj = nn.Linear(self.q_size,config.hidden_size,bias=False)
 
-        self.attn = Attention(self.num_heads,self.head_dim,self.num_kv_heads)
+        self.attn = Attention(self.num_heads,self.head_dim,self.num_kv_heads,layer_id)
 
         self.q_norm = RMSNorm(self.head_dim,eps = config.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim,eps = config.rms_norm_eps)
@@ -67,9 +74,9 @@ class Qwen3Attention(nn.Module):
         return self.o_proj(self.attn(q,k,v).flatten(-2))
 
 class Qwen3DecoderLayer(nn.Module):
-    def __init__(self,config:Qwen3Config):
+    def __init__(self,config:Qwen3Config,layer_id:int):
         super().__init__()
-        self.self_attn = Qwen3Attention(config)
+        self.self_attn = Qwen3Attention(config,layer_id)
         self.mlp = Qwen3MLP(config)
         self.input_layernorm = RMSNorm(config.hidden_size,eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,eps=config.rms_norm_eps)
@@ -99,7 +106,7 @@ class Qwen3Model(nn.Module):
         self.norm = RMSNorm(config.hidden_size,eps=config.rms_norm_eps)
 
         self.layers = nn.ModuleList(
-            [Qwen3DecoderLayer(config) for _ in range(config.num_hidden_layers)]
+            [Qwen3DecoderLayer(config,i) for i in range(config.num_hidden_layers)]
         )
         self.embed_tokens = nn.Embedding(config.vocab_size,config.hidden_size)
 

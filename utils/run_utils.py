@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
+ 
 
 
 def load_config(path: Path, defaults: dict) -> dict:
