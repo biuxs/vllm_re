@@ -4,7 +4,6 @@ from dataclasses import dataclass,field
 
 @dataclass
 class Sequence:
-    token_ids: list[int]
     token_ids: list[int] # 保存这条请求全部逻辑token，包括输入prompt加decode已经生成出来的token
     block_size: int # 每个物理block可以存放的token数
 

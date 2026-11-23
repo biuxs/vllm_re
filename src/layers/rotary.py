@@ -14,8 +14,8 @@ class RotaryEmbedding(nn.Module):
         self.head_size = head_size
         self.rotary_dim = rotary_dim
         self.half = rotary_dim // 2
-        inv_freq = 1.0/(base ** (torch.arange(0,rotary_dim, step = 2)/rotary_dim))
-        t = torch.arange(max_position_embedding)
+        inv_freq = 1.0/(base ** (torch.arange(0,rotary_dim, step = 2, dtype=torch.float)/rotary_dim))
+        t = torch.arange(max_position_embedding, dtype=torch.float)
         freqs = torch.outer(t, inv_freq)
         self.register_buffer(
             'cos_sin_cache',

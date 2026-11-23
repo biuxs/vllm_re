@@ -21,7 +21,7 @@ from .prefix.hash_index import HashPrefixIndex
 from .prefix.noop import NoopPrefixIndex
 from .sequence import Sequence
 
-_PrefixBackend = Literal["hash"]
+_PrefixBackend = Literal["hash","none"]
 
 def _make_index(backend: _PrefixBackend):
     """ 按配置创建前缀索引后端 """

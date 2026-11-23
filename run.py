@@ -92,7 +92,7 @@ def main() -> None:
 
     config_path = Path(args.config) if args.config else HERE / "config.yaml"
     cfg = load_config(config_path,DEFAULTS)
-    merge_cli(cfg, args, ("model", "prompt", "max_new_tokens", "temperature", "top_p", "top_k","block-size","prefix-backend"))
+    merge_cli(cfg, args, ("model", "prompt", "max_new_tokens", "temperature", "top_p", "top_k","block_size","prefix_backend"))
     run(cfg)
 
 if __name__ == "__main__":
