@@ -27,24 +27,30 @@ class Attention(nn.Module):
             value:torch.Tensor,
             is_causal: bool,
             attn_mask: torch.Tensor | None = None,) -> torch.Tensor:
-        kwargs: dict = {"scale":self.scaling}
-       
-
+        """输入 Q=[B,H,S,D]，K/V=[B,Hkv,T,D]，输出 [B,H,S,D]。"""
         B, H, S, D = query.shape
         T = key.shape[2]
         query = query.reshape(B,self.num_kv_heads,self.groups,S,D)
         key = key.unsqueeze(2)
         value = value.unsqueeze(2)
 
-        
-        scores = query @ key.transpose(-2,-1) *self.scaling
+        # 半精度输入使用 FP32 计算分数、softmax 和加权求和，最后还原 dtype。
+        compute_dtype = (
+            torch.float32 if query.dtype in (torch.float16, torch.bfloat16) else query.dtype
+        ) 
+        #[B,Hkv,G,S,T]
+        scores = query.to(compute_dtype) @ key.to(compute_dtype).transpose(-2,-1) *self.scaling
         if attn_mask is not None:
+            # 兼容可广播到 [B,H,S,T] 的布尔 mask 和加性 mask。
+            mask = torch.broadcast_to(attn_mask, (B, H, S, T)).reshape(
+                B, self.num_kv_heads, self.groups, S, T
+            )
             if attn_mask.dtype == torch.bool:
             # True 表示允许关注，False 表示禁止关注
-                scores = scores.masked_fill(~attn_mask, float("-inf")
+                scores = scores.masked_fill(~mask, float("-inf")
             )
             else:
-                scores = scores + attn_mask
+                scores = scores + mask.to(compute_dtype)
         elif is_causal:
             # Q 对应完整 KV 序列的最后 S 个位置
             q_pos = torch.arange(T - S, T, device=query.device)[:, None]
@@ -55,9 +61,11 @@ class Attention(nn.Module):
 
             scores = scores.masked_fill(mask, float("-inf"))
 
-        out = F.softmax(scores,dim=-1,dtype=torch.float32).to(query.dtype) @value
-
-        return out.reshape(B,H,S,D)
+        weights = torch.softmax(scores, dim=-1)
+        # 一整行被 mask 时 softmax(-inf) 为 NaN，按 SDPA 约定输出零。
+        weights = torch.nan_to_num(weights, nan=0.0)
+        out = weights @ value.to(compute_dtype)
+        return out.reshape(B, H, S, D).to(query.dtype)
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         ctx = get_forward_context()
@@ -80,28 +88,42 @@ class Attention(nn.Module):
             # 2 contiguous 保证内存连续 经过transpose后，内存存储是乱序的，如果非连续张量调用reshape会报错，因此需要内存连续
             # 3 具体做法是拷贝一份张量，在内存里重新排序，对齐逻辑顺序和内存顺序
 
-        start = ctx.cache_len   # 本步开始前已有 KV 长度
-        n = q.shape[2]          # 本步新增 token 数
-        total = ctx.seq_len     # 本步写完后的总 KV 长度
-        assert total == start + n
-
         # 1) write 把本步计算出来的新 K、V 按 slot_mapping 写入 KV 缓存存储池
         ctx.store.write(self.layer_id,ctx.slot_mapping,k.transpose(1,2),v.transpose(1,2))
 
-        # 2) gather 按 block_table 读回逻辑长度 total 的全部历史 K V
-        k_c,v_c = ctx.store.gather(self.layer_id,ctx.block_table,total)
-        # k_c.shape=[seq_len,num_kv_heads,head_dim]
-        k_c = k_c.unsqueeze(0).transpose(1, 2)
-        v_c = v_c.unsqueeze(0).transpose(1, 2)
-        # k_c.shape=[1,num_kv_heads,seq_len,head_dim]
+        if ctx.is_prefill:
+            return self._prefill(q,k,v,ctx)
+        return self._decode(q,ctx)
 
-        # 3) attend：本步 Q 与历史做注意力，掩码随 Prefill / Decode / 部分 Prefill 变化
+    def _prefill(self,q,k,v,ctx) ->torch.Tensor:
+        cached = ctx.cached_lens[0] if ctx.cached_lens else 0
+        ctx_len = ctx.context_lens[0]
+        q_len = ctx.query_lens[0]
 
-        if n == 1: # Decode 只看历史，无掩码
-            out = self._sdpa(q,k_c,v_c,is_causal=False)
-        else: out = self._sdpa(q,k_c,v_c,is_causal=True)
+        if cached == 0:
+            out = self._sdpa(q,k,v,is_causal=True)
+            return out.transpose(1, 2).contiguous()
 
+        k_full, v_full = ctx.store.gather(self.layer_id, ctx.block_tables[0], ctx_len)
+        k_full = k_full.unsqueeze(0).transpose(1, 2)
+        v_full = v_full.unsqueeze(0).transpose(1, 2)
+        device = q.device
+        qi = torch.arange(q_len,device=device).unsqueeze(1) + cached
+        ki = torch.arange(ctx_len,device=device).unsqueeze(0)
+        allow = qi >= ki
+        out = self._sdpa(q, k_full, v_full, is_causal=False, attn_mask=allow)
         return out.transpose(1, 2).contiguous()
+
+    def _decode(self,q,ctx) -> torch.Tensor:
+        outs = []
+        for b in range(q.shape[0]):
+            ctx_len = ctx.context_lens[b]
+            #返回[s,hkv,d]
+            k_c,v_c = ctx.store.gather(self.layer_id, ctx.block_tables[b], ctx_len)
+            k_c = k_c.unsqueeze(0).transpose(1,2)
+            v_c = v_c.unsqueeze(0).transpose(1,2)
+            outs.append(self._sdpa(q[b:b+1],k_c,v_c,is_causal=False))
+        return torch.cat(outs, dim=0).transpose(1, 2).contiguous()
 
 if __name__ == "__main__":
     torch.manual_seed(42)

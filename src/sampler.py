@@ -10,6 +10,7 @@ class Sampler:
             temperatures:torch.Tensor | None = None,
             top_ps: torch.Tensor | None = None,
             top_ks: torch.Tensor | None = None,
+            min_ps: torch.Tensor | None = None,
                  ) -> torch.Tensor:
 
         if temperatures is None and top_ks is None and top_ps is None:
@@ -25,7 +26,7 @@ class Sampler:
             logits  = logits/temperatures.unsqueeze(-1)
 
         logits = _top_k_top_p(logits, top_ps, top_ks)
-
+        logits = _min_p(logits, min_ps)
         probs = torch.softmax(logits, dim=-1)
         return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
@@ -67,3 +68,9 @@ def _apply_top_p(sorted_logits: torch.Tensor, top_p: torch.Tensor) -> torch.Tens
     # 将超出 p 的部分置为 -inf
     min_val = torch.finfo(sorted_logits.dtype).min
     return sorted_logits.masked_fill(mask, min_val)
+def _min_p(logits: torch.Tensor, min_p: torch.Tensor | None) -> torch.Tensor:
+    if min_p is None:
+        return logits
+    probs = torch.softmax(logits, dim=-1)
+    top, _ = probs.max(dim=-1, keepdim=True)
+    return logits.masked_fill(probs < min_p.unsqueeze(1) * top, -float("inf"))

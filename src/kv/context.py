@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -15,12 +15,13 @@ if TYPE_CHECKING: # 静态检查时为True 实际允许时为False
 class ForwardContext:
     """ Attention 只用页表合同 """
 
-    is_prefill: bool              # 是否 prefill 步
-    cache_len: int                # 本步开始前已有 KV 长度
-    seq_len: int                  # 本步写完后的总 KV 长度（= gather 的长度）
-    slot_mapping: torch.Tensor    # 本步要写入的物理 slot
-    block_table: list[int]        # 逻辑页 → 物理块号
-    store: PagedStore             # 物理读写模块
+    is_prefill: bool
+    store: PagedStore
+    block_tables: list[list[int]]
+    slot_mapping: torch.Tensor
+    query_lens: list[int]
+    context_lens: list[int]
+    cached_lens: list[int] = field(default_factory=list)
 
 _forward_ctx: ForwardContext | None = None
 

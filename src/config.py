@@ -2,8 +2,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass,field
 from transformers import AutoConfig,PretrainedConfig
-
-
+from typing import Literal
+import math
 @dataclass
 class EngineConfig:
     model: str # 模型路径，定位加载对应模型
@@ -14,6 +14,11 @@ class EngineConfig:
     prefix_backend: Literal["none", "hash"] = "hash"
     block_size: int = 16
     num_kv_blocks: int = 0  # 0 → 按 context_len 推导
+
+    max_num_seqs: int = 8  # 最大请求数量
+    max_num_batched_tokens: int = 4096 # 单条batch最大token数
+    # True: decode + prefill chunk 同一步；False: 旧 Prefill-first
+    mix_prefill_decode: bool = True
 
     def __post_init__(self) -> None:
         # expanduser 路径中~替换为真实系统路径
@@ -27,6 +32,10 @@ class EngineConfig:
             )
         if self.block_size <= 0:
             raise ValueError("block_size must be > 0")
-        if self.num_kv_blocks <=0:
-            need = (self.context_len + self.block_size - 1) // self.block_size
-            self.num_kv_blocks = max(need * 2, need + 8)
+        if self.max_num_seqs <= 0:
+            raise ValueError("max_num_seqs must be > 0")
+        if self.max_num_batched_tokens <= 0:
+            raise ValueError("max_num_batched_tokens must be > 0")
+        if self.num_kv_blocks <= 0:
+            pages = math.ceil(self.context_len / self.block_size)
+            self.num_kv_blocks = max(pages * self.max_num_seqs, pages + 8)

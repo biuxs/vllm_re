@@ -1,14 +1,33 @@
 """按页读写物理 KV 页池"""
 from __future__ import annotations
-
+from typing import Protocol
 import torch
+
+class _BlockTensorStore(Protocol):
+    # Protocol 协议类型，相当于接口定义,描述 KV 显存池对象必须具备的成员与张量 shape
+    block_size: int
+    num_kv_heads: int
+    head_dim: int
+    k: torch.Tensor  # [L, N_blocks, B, Hkv, D]
+    v: torch.Tensor
+
+def _coerce_kv_token_major(
+        k:torch.Tensor,v:torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """ 把 KV 统一转换成 token 主维度格式 [total_tokens, Hkv, D] """
+    if k.dim() == 4:
+        b, s, h, d = k.shape
+        return k.reshape(b * s, h, d), v.reshape(b * s, h, d)
+    if k.dim() == 3:
+        return k, v
+    raise ValueError(f"unexpected k rank {k.dim()}")
 
 class PagedStore:
     """ 分页 KV 存储：write（本步 K/V 写入 slot）+ gather（按页表读回历史）。
 
     物理布局 [num_layers, num_blocks, block_size, num_kv_heads, head_dim]。
     """
-    def __init__(self,pool) -> None:
+    def __init__(self,pool: _BlockTensorStore) -> None:
         """ 绑定一块物理页池。 """
         self.pool = pool
 
@@ -27,8 +46,7 @@ class PagedStore:
             k: torch.Tensor, # 本步算出的新的k和v，注意区分self.pool.k：跨推理步骤长期保存的完整 KV Cache，是写入目标。
             v: torch.Tensor,
     ) -> None:
-        k = k[0]
-        v = v[0]
+        k, v = _coerce_kv_token_major(k, v)
         n = k.shape[0]
         if slot_mapping.numel() !=n:
             raise ValueError("Slot number mismatch between token number")

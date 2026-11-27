@@ -65,17 +65,11 @@ class KVManager:
             token_ids=list(token_ids),
             block_size=self.block_size,
         )
-
-    def allocate(self,seq:Sequence) -> None:
-        """前缀命中复用页，其余 allocte_fresh;写好 block_table"""
-        seq.block_table.clear()
-        seq.num_cached_tokens = 0 #当前请求复用的前缀token数量
-        seq.num_computed_tokens = 0
+    def _fit_prefix(self, seq: Sequence) -> int:
+        """前缀复用预检查：计算当前序列最多可复用多少连续前缀 KV 块。"""
         need = seq.num_blocks
         if need ==0:
-            self.last_num_cached_tokens = 0
-            return
-
+            return 0
         hit = self.index.match(seq,self.pool)
         max_cached = min(len(hit),need) #计划复用块
         #bolck三种状态：free、used、cached
@@ -83,9 +77,26 @@ class KVManager:
         reclaimable = sum(1 for b in hit[:max_cached] if b in self.pool.cached_ids)
         other_cached = len(self.pool.cached_ids) - reclaimable
         new_needed = need - max_cached #复用之后需要的块
-        if len(self.pool.free_ids) + other_cached < new_needed:
-            raise RuntimeError("not enough KV blocks for sequence")
+        if len(self.pool.free_ids) + other_cached >= new_needed:
+            return max_cached
+        return -1
 
+    def can_allocate(self, seq: Sequence) -> bool:
+        """ 判断新请求是否有足够物理块可分配 """
+        return self._fit_prefix(seq) >= 0
+
+    def allocate(self,seq:Sequence) -> None:
+        """前缀命中复用页，其余 allocte_fresh;写好 block_table"""
+        seq.block_table.clear()
+        seq.num_cached_tokens = 0 #当前请求复用的前缀token数量
+        need = seq.num_blocks
+        if need == 0:
+            self.last_num_cached_tokens = 0
+            return
+        max_cached = self._fit_prefix(seq)
+        if max_cached < 0:
+            raise RuntimeError("not enough KV blocks for sequence")
+        hit = self.index.match(seq, self.pool)
         for bid in hit[:max_cached]:
             if bid in self.pool.used_ids:
                 self.pool.blocks[bid].ref_count += 1 # 可复用块 引用加一
@@ -100,10 +111,29 @@ class KVManager:
             seq.block_table.append(self.pool.allocate_fresh())
 
         seq.num_cached_tokens = max_cached * self.block_size
-        seq.num_computed_tokens = seq.num_cached_tokens
         self.last_num_cached_tokens = seq.num_cached_tokens
 
-
+    def can_append(self, seq: Sequence) -> bool:
+            """ Decode阶段判断当前能不能给这个 sequence append 1 个新 token """
+            """
+            自回归解码流程：
+            处理 token T，写入 T 的 KV
+            ↓
+            根据 logits 采样出 token T+1
+            ↓
+            把 T+1 append 到 seq.token_ids
+            ↓
+            下一轮以 T+1 为输入，写入 T+1 的 KV
+            
+            现在token T+1已经生成在seq中，但是T+1 还没有append 到 seq.token_ids
+            """
+            need_new = len(seq) % self.block_size == 1
+            return (not need_new) or len(self.pool.free_ids) >= 1
+    
+    def may_append(self, seq: Sequence) -> None:
+        """ Decode 生成阶段，执行真正的 block 分配动作 """
+        if len(seq) % self.block_size == 1:
+            seq.block_table.append(self.pool.allocate_fresh())
 
     def ensure_blocks(self,seq:Sequence) -> None:
         """ decode 变长时把 block_table 补到够用 """
@@ -111,19 +141,32 @@ class KVManager:
         while len(seq.block_table) < seq.num_blocks:
             seq.block_table.append(self.pool.allocate_fresh())
 
-    def finish(self,seq:Sequence) -> None:
-        """ 发布已写完 KV 的整块；页转 cached 或 free """
-        n_full = seq.num_computed_tokens // self.block_size
-        if n_full > 0: # 注册发布到前缀索引
+
+    def sync_prefix(self,seq:Sequence) -> None:
+            """ postprocess()调用 把这个序列已经完整填满的 KV block，发布到 prefix 索引 """
+            n_full = seq.num_full_blocks()
+            if n_full > 0 and self.prefix_backend !="none":
+                self.index.publish(seq,n_full,self.pool)
+    
+
+    def deallocate(self, seq: Sequence,*,publish: bool) -> None:
+        """ 释放一个 sequence 持有的全部物理 block """
+        """ publish=False 任务被抢占暂停，不发布prefix缓存，尽量保留共享缓存数据 """
+        """ publish=True 请求彻底跑完，把完整block提交给prefix缓存 """
+        n_full = seq.num_full_blocks() if publish else 0
+        if publish and n_full > 0:
             self.index.publish(seq,n_full,self.pool)
-        published = set(seq.block_table[:n_full]) if n_full > 0 else set() # 进索引的满块bid
+        
+        published = set(seq.block_table[:n_full]) if n_full > 0 else set()
         for bid in list(seq.block_table):
             keep = bid in published and self.prefix_backend != "none"
-            # bid in published 其实代表是否是完整满块
-            # 之前的block_table 包含 prefix复用块，新加块，decode新加块
+            # hash 索引下，这个block不保留做共享缓存，从hash索引作废
             if not keep and self.prefix_backend == "hash":
                 self.index.invalidate(bid, self.pool) # keep不是满块则不保留清理索引
             self.pool.release_to_cached_or_free(bid, keep_cached=keep) # 所有块更新物理池状态
         seq.block_table.clear()
         seq.num_cached_tokens = 0
-        seq.num_computed_tokens = 0
+
+
+    def finish(self, seq: Sequence) -> None:
+        self.deallocate(seq, publish=True)

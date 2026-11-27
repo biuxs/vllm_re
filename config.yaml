@@ -10,3 +10,13 @@ top_k: 20
 
 # --- 引擎 ---
 dtype: "auto"
+context_len: 2048
+
+# --- KV Cache ---
+block_size: 16
+prefix_backend: "hash"  
+
+# --- 调度器 ---
+max_num_seqs: 8
+max_num_batched_tokens: 4096
+mix_prefill_decode: true
