@@ -5,7 +5,7 @@
 
 ### v0 → v1：分页 KV 缓存
 
-基线是 `v0` 标签（`6929e41`），每步重新计算全部历史 token。分页 KV 缓存实现（`71ce959`，后续形成 `v1` 标签）在 Prefill 后每步只对一个新 token 做前向，注意力层从页池读取历史 K/V。
+基线是 `v0` 标签（`6929e41`），每步重新计算全部历史 token。分页 KV 缓存实现`v1` 标签（`9e33be5`）在 Prefill 后每步只对一个新 token 做前向，注意力层从页池读取历史 K/V。
 
 测试使用 NVIDIA GeForce RTX 3050 Ti Laptop GPU（4 GiB）、同一份 Qwen3-0.6B 权重、BF16、eager 模式和贪心解码。预热后每项测 3 次，表中为中位数。计时从调用生成接口开始，排除模型加载和终端打印。冷请求在空前缀缓存下运行。
 
@@ -21,7 +21,7 @@
 
 ### v1 → v2：Continuous Batching
 
-`v1` 标签（`9e33be5`）一次只能执行一个请求；当前 v2 工作树基于 `v2` 标签（`5e1f60f`），由 Scheduler 每轮动态组成 Decode batch，并在剩余 token budget 中调度 Prefill chunk。
+`v1` 标签（`9e33be5`）一次只能执行一个请求；当前 v2 工作树基于 `v2` 标签，由 Scheduler 每轮动态组成 Decode batch，并在剩余 token budget 中调度 Prefill chunk。
 
 测试使用同一块 RTX 3050 Ti Laptop GPU、Qwen3-0.6B、PyTorch 2.14.1+cu126、BF16、eager 模式和贪心解码。关闭 EOS 提前结束和前缀复用，固定 `block_size=16`、`context_len=512`、`num_kv_blocks=96`。预热后每项重复 3 次取中位数，排除模型加载时间。4 个请求视为同时到达；v1 按接口能力串行执行，v2 同时加入调度器。
 
