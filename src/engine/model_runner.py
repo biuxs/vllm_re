@@ -44,9 +44,9 @@ class ModelRunner:
         )
         return int(token.item()) # 取出tensor的token_id,转为普通int返回
     @torch.inference_mode()
-    def run_prefill_one(self, seq: Sequence) -> int:
+    def run_prefill_one(self, seq: Sequence) -> int | None:
         """ 单次 prefill 前向  """
-        start = seq.num_cached_tokens
+        start = seq.num_computed_tokens
         end = start + seq.num_scheduled_tokens
         tokens = seq.token_ids[start:end]
         slots = slots_tensor(seq.block_table,start,end,self.block_size,device=self.device)
@@ -66,6 +66,8 @@ class ModelRunner:
             positions = self._tensor([list(range(start,end))])
 
             h = self.model(ids,positions)
+            if end < seq.num_tokens:
+                return None
             logits = self.model.compute_logits(h[:, -1:]).squeeze(1)
             return self._sample_one(logits,seq)
         finally:
@@ -102,7 +104,9 @@ class ModelRunner:
         finally:
             set_forward_context(None) # 清空全局 ForwardContext
 
-    def run(self, prefills: list[Sequence], decodes: list[Sequence]) -> tuple[list[int], list[int]]:
+    def run(
+        self, prefills: list[Sequence], decodes: list[Sequence]
+    ) -> tuple[list[int | None], list[int]]:
         """ step()调用 优先执行 decode，保证正在流式输出的请求持续向前推进，之后再执行 prefill 分片"""
         d_ids = self.run_decode_batch(decodes) if decodes else []
         p_ids = [self.run_prefill_one(s) for s in prefills] if prefills else []

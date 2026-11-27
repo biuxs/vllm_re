@@ -23,7 +23,10 @@ class Sequence:
     block_size: int # 每个物理block可以存放的token数
 
     block_table: list[int] = field(default_factory=list) # 逻辑块索引到物理块索引的映射 PagedAttention页表
+    # 本次分配从前缀缓存命中的 token 数，仅用于命中统计。
     num_cached_tokens: int = 0
+    # 已经实际完成 forward、KV 内容有效的 token 数。
+    num_computed_tokens: int = 0
 
     seq_id: int = 0
     status: SequenceStatus = SequenceStatus.WAITING # 请求当前的生命周期状态

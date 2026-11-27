@@ -53,17 +53,6 @@ class Scheduler:
         self.kv.allocate(seq)
         return True
 
-    def _promote_full_hit(self, seq: Sequence) -> None:
-        # 前缀缓存命中完整 prompt 跳过 prefill 直接进入 running 准备 decode
-        if not seq.block_table:
-            if not self._try_alloc(seq):
-                return
-        seq.num_scheduled_tokens = 0
-        seq.is_prefill = True # 临时保留 Ture 等到被 decode 调度选中再改写
-        seq.status = SequenceStatus.RUNNING
-        self.waiting.popleft()
-        self.running.append(seq)
-
     def preempt(self,seq: Sequence) -> None:
         """抢占驱逐：把 running 中的 seq 踢回 waiting ；释放它的 KV 块，后续重新分配恢复"""
         if seq.status == SequenceStatus.FINISHED:
@@ -101,8 +90,8 @@ class Scheduler:
                 decodes.append(seq)
                 tokens_used += 1
 
-        if decodes: # 把本batch要跑的decode，放回running队列头部，下一轮还能继续调度
-            self.running.extendleft(reversed(decodes))
+        if decodes: # 放到队尾，保证超过单批并发上限时也能轮转调度
+            self.running.extend(decodes)
         return tokens_used
 
     def _pull_prefill_chunk(
@@ -122,16 +111,15 @@ class Scheduler:
         if not self._try_alloc(seq):
             return tokens_used
 
-        need = seq.num_tokens - seq.num_cached_tokens
+        need = seq.num_tokens - seq.num_computed_tokens
         if need <= 0:
-            self._promote_full_hit(seq)
-            return tokens_used
+            raise RuntimeError("waiting sequence has no token left to compute")
 
         chunk = min(need, remaining)
         seq.num_scheduled_tokens = chunk
         seq.is_prefill = True
         prefills.append(seq)
-        if seq.num_cached_tokens + chunk == seq.num_tokens:
+        if seq.num_computed_tokens + chunk == seq.num_tokens:
             # 如果这一轮chunk跑完，prefill完成，走decode
             seq.status = SequenceStatus.RUNNING
             self.waiting.popleft()
@@ -153,10 +141,9 @@ class Scheduler:
             seq = self.waiting[0]
             if not self._try_alloc(seq):
                 break
-            need = seq.num_tokens - seq.num_cached_tokens
+            need = seq.num_tokens - seq.num_computed_tokens
             if need <= 0:
-                self._promote_full_hit(seq)
-                continue
+                raise RuntimeError("waiting sequence has no token left to compute")
             if remaining < need and prefills:
                 break
 
@@ -165,7 +152,7 @@ class Scheduler:
             seq.is_prefill = True
             tokens_used += chunk
             prefills.append(seq)
-            if seq.num_cached_tokens + chunk == seq.num_tokens:
+            if seq.num_computed_tokens + chunk == seq.num_tokens:
                 # prefill跑完
                 seq.status = SequenceStatus.RUNNING
                 self.waiting.popleft()
@@ -198,7 +185,7 @@ class Scheduler:
     def postprocess(
             self,
             seqs:list[Sequence], # 本轮执行的序列列表
-            token_ids: list[int], # 模型输出token
+            token_ids: list[int | None], # 仅最终 prefill chunk 或 decode 才有输出token
             *,
             is_prefill: bool,
     ) -> list[Sequence]:
@@ -206,15 +193,17 @@ class Scheduler:
         finished: list[Sequence] = []
         for seq, token_id in zip(seqs, token_ids):
             if seq.num_scheduled_tokens > 0:
-                seq.num_cached_tokens += seq.num_scheduled_tokens # 本轮跑过的token累加到num_cached_tokens
+                seq.num_computed_tokens += seq.num_scheduled_tokens
                 self.kv.sync_prefix(seq) # 更新 KV cache 满块登记到prefix
             seq.num_scheduled_tokens = 0 # 临时调度字段，每轮用完重置
 
-            if is_prefill and seq.num_cached_tokens < seq.num_prompt_tokens:
-                # prefill批次，并且prompt还没有跑完，说明分片了
+            if is_prefill and seq.num_computed_tokens < seq.num_tokens:
+                # 首次 prefill 或抢占恢复尚未处理完整个现有序列。
                 continue
 
             # prefill跑完或者decode
+            if token_id is None:
+                raise RuntimeError("final prefill/decode step did not produce a token")
             seq.append_token(token_id) # 追加模型输出token，进入真正生成阶段
             hit_eos =(not seq.ignore_eos) and token_id == self.eos # 遇到结束token
             hit_len = seq.num_completion_tokens >= seq.max_tokens # 输出token满 
